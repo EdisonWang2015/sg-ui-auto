@@ -1,0 +1,36 @@
+# AutoGLM 测试框架配置文件示例
+# 复制此文件为 config.yaml 并填写实际配置
+
+# API 配置
+api:
+  base_url: "https://open.bigmodel.cn/api/paas/v4"
+  model_name: "autoglm-phone"
+  # API密钥（支持环境变量: AUTOGLM_API_KEY 或 PHONE_AGENT_API_KEY）
+  api_key: "your_api_key_here"
+
+# Agent 配置
+agent:
+  max_steps: 100              # 最大执行步数
+  default_timeout: 180        # 默认超时时间（秒）
+  verbose: false              # 是否显示详细输出
+  lang: "cn"                  # 语言 (cn/en)
+
+# 设备配置（可选，用于记录设备信息）
+devices:
+  - device_id: "YOUR_DEVICE_ID"
+    name: "测试设备"
+
+# 执行配置
+execution:
+  max_workers: 1              # 最大并发数（同一设备建议设为1）
+  continue_on_failure: false  # 失败后是否继续执行
+  retry_on_failure: 0         # 失败重试次数
+  retry_delay: 1.0            # 重试延迟（秒）
+
+# 报告配置
+reporting:
+  output_dir: "test_reports"  # 报告输出目录
+  formats: ["html", "json"]   # 报告格式
+  include_screenshots: true   # 是否包含截图
+  include_raw_output: false   # 是否包含完整原始输出
+  raw_output_max_length: 1000 # 原始输出最大长度
