@@ -222,7 +222,7 @@ class DualReporterEnhanced:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AutoGLM 测试报告</title>
+    <title>森果云UI自动化测试报告</title>
     <style>
         * {{
             margin: 0;
@@ -479,8 +479,8 @@ class DualReporterEnhanced:
 <body>
     <div class="container">
         <div class="header">
-            <h1>AutoGLM 测试报告</h1>
-            <div class="timestamp">生成时间: {report_data["timestamp"]}</div>
+            <h1>森果云UI自动化测试报告</h1>
+            <div class="timestamp">生成时间: {time.strftime("%Y年%m月%d日%H时%M分%S秒")}</div>
         </div>
 
         <div class="summary">
@@ -673,7 +673,7 @@ class DualReporterEnhanced:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AutoGLM 设备错误报告</title>
+    <title>森果云UI自动化测试报告 - 设备错误</title>
     <style>
         * {{
             margin: 0;
