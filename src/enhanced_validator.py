@@ -5,6 +5,7 @@
 继承test_validator.py，增强AutoGLM特定验证逻辑
 """
 
+import os
 import re
 from typing import Dict, Any, List, Tuple
 from dataclasses import dataclass, field
@@ -69,6 +70,7 @@ class EnhancedValidator:
         """
         self.base_validator = TestValidator(device_id)
         self.device_id = device_id
+        self._keyword_cache = {}  # 关键词提取缓存
 
     def validate_autoGLM_result(
         self,
@@ -125,7 +127,7 @@ class EnhancedValidator:
 
     def _verify_keyword(self, output: str, expected: str) -> Dict[str, Any]:
         """
-        关键词验证
+        关键词验证（使用 LLM 智能提取关键词）
 
         Args:
             output: AutoGLM输出
@@ -134,18 +136,33 @@ class EnhancedValidator:
         Returns:
             验证结果字典
         """
-        # 移除✅等前缀符号进行匹配
         clean_expected = expected.lstrip('✅❌⚠️')
 
-        # 检查是否包含
-        passed = clean_expected in output
+        # 使用 LLM 提取关键词
+        try:
+            keywords = self._extract_keywords_with_llm(clean_expected)
+        except Exception as e:
+            # 如果 LLM 失败，回退到规则提取
+            print(f"[INFO] LLM 关键词提取失败，使用规则提取: {e}")
+            keywords_str = self._extract_keywords_with_rules(clean_expected)
+            keywords = [kw.strip() for kw in keywords_str.split(',') if kw.strip()]
+
+        # 验证所有关键词是否都在输出中
+        found_keywords = [kw for kw in keywords if kw in output]
+        passed = len(found_keywords) == len(keywords)
 
         return {
             "type": AutoGLMValidationType.KEYWORD.value,
             "expected": expected,
-            "actual": "found" if passed else "not found",
+            "actual": f"找到关键词: {found_keywords}",
             "passed": passed,
-            "message": "关键词匹配成功" if passed else f"未找到关键词: {clean_expected}"
+            "message": f"关键词匹配 {len(found_keywords)}/{len(keywords)}",
+            "keywords": {
+                "extracted_by": "LLM" if found_keywords else "Rule-based",
+                "expected": keywords,
+                "found": found_keywords,
+                "missing": [kw for kw in keywords if kw not in output]
+            }
         }
 
     def _verify_amount(self, output: str, expected_amount_str: str) -> Dict[str, Any]:
@@ -224,6 +241,147 @@ class EnhancedValidator:
             "passed": passed,
             "message": f"{field_name}验证{'通过' if passed else '失败'}"
         }
+
+    def _extract_keywords_with_llm(self, expected: str) -> List[str]:
+        """
+        使用 LLM 从预期结果中提取关键验证点
+
+        Args:
+            expected: 预期结果描述（如："验证页面底部出现'新建采购单'按钮"）
+
+        Returns:
+            关键词列表（如：["新建采购单", "按钮"]）
+        """
+        # 检查缓存
+        if expected in self._keyword_cache:
+            return self._keyword_cache[expected]
+
+        prompt = f"""从以下测试预期结果中提取关键验证点（只返回关键词，用逗号分隔）：
+
+预期结果：{expected}
+
+提取规则：
+1. 提取需要验证的核心元素（如：采购单、按钮、金额等）
+2. 移除无关的描述性词语（如：验证、页面、底部、出现等）
+3. 提取引号中的内容
+4. 只返回关键词，不要解释
+
+示例：
+输入: "验证页面底部出现'新建采购单'按钮"
+输出: 新建采购单, 按钮
+
+输入: "跳转后的页面，顶部有'采购单'文字显示"
+输出: 采购单
+
+输入: "页面显示'订单数量：5'"
+输出: 订单数量, 5
+"""
+
+        try:
+            response = self._call_llm_api(prompt)
+            keywords = [kw.strip() for kw in response.split(',') if kw.strip()]
+
+            # 保存到缓存
+            self._keyword_cache[expected] = keywords
+            return keywords
+
+        except Exception as e:
+            print(f"[INFO] LLM 关键词提取失败，使用规则提取: {e}")
+            keywords_str = self._extract_keywords_with_rules(expected)
+            keywords = [kw.strip() for kw in keywords_str.split(',') if kw.strip()]
+            self._keyword_cache[expected] = keywords
+            return keywords
+
+    def _call_llm_api(self, prompt: str, model: str = "glm-4-flash") -> str:
+        """
+        调用智谱 AI API 进行关键词提取
+
+        Args:
+            prompt: 提示词
+            model: 模型名称（默认使用 glm-4-flash，速度快且便宜）
+
+        Returns:
+            LLM 响应文本
+        """
+        try:
+            from zhipuai import ZhipuAI
+
+            # 优先从环境变量获取 API key，否则从配置文件读取
+            api_key = os.getenv("ZHIPUAI_API_KEY")
+
+            if not api_key:
+                # 从配置文件读取 API key
+                try:
+                    import yaml
+                    config_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'config', 'config.yaml')
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        config = yaml.safe_load(f)
+                        api_key = config.get('api', {}).get('api_key', '')
+                except Exception as e:
+                    print(f"[INFO] 无法从配置文件读取 API key: {e}")
+
+            if not api_key:
+                raise ValueError("ZHIPUAI_API_KEY 环境变量未设置且配置文件中也未找到")
+
+            client = ZhipuAI(api_key=api_key)
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{
+                    "role": "user",
+                    "content": prompt
+                }],
+                max_tokens=100,
+                temperature=0,  # 使用低温度以获得一致的输出
+            )
+
+            return response.choices[0].message.content
+
+        except Exception as e:
+            # 如果 LLM 调用失败，抛出异常让调用方处理
+            print(f"[WARNING] 智谱 AI API 调用失败: {e}，使用规则提取作为后备")
+            raise e
+
+    def _extract_keywords_with_rules(self, text: str) -> str:
+        """
+        使用规则提取关键词（LLM 的后备方案）
+
+        Args:
+            text: 预期结果文本
+
+        Returns:
+            逗号分隔的关键词字符串
+        """
+        keywords = []
+
+        # 1. 提取引号内容（支持英文和中文引号）
+        # 英文引号
+        keywords.extend(re.findall(r'"([^"]+)"', text))
+        keywords.extend(re.findall(r"'([^']+)'", text))
+        # 中文引号 "" (U+201C, U+201D)
+        chinese_left_quote = chr(8220)   # "
+        chinese_right_quote = chr(8221)  # "
+        keywords.extend(re.findall(f'{re.escape(chinese_left_quote)}([^{re.escape(chinese_right_quote)}]+){re.escape(chinese_right_quote)}', text))
+        # 中文引号 '' (U+2018, U+2019)
+        chinese_single_left = chr(8216)  # '
+        chinese_single_right = chr(8217) # '
+        keywords.extend(re.findall(f'{re.escape(chinese_single_left)}([^{re.escape(chinese_single_right)}]+){re.escape(chinese_single_right)}', text))
+
+        # 2. 如果没有提取到引号内容，使用简单规则
+        if not keywords:
+            # 移除常见的无意义词
+            stop_words = {
+                "验证", "检查", "确认", "显示", "出现", "页面", "底部", "顶部",
+                "是否有", "是否", "应该", "需要", "包含", "存在", "跳转后", "的"
+            }
+
+            # 分词（简单按空格和标点分割）
+            words = re.split(r'[,，.。、\s]+', text)
+            keywords = [w for w in words if w and w not in stop_words and len(w) > 1]
+
+        # 去重并返回
+        unique_keywords = list(dict.fromkeys(keywords))
+        return ", ".join(unique_keywords)
 
     def verify_popup_appeared(
         self,

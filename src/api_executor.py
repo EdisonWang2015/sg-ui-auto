@@ -235,8 +235,8 @@ class APIExecutor:
                 start_time=start_time_str,
                 end_time=time.strftime("%Y-%m-%d %H:%M:%S"),
                 device_id=test_case.device_id,
-                output=f"执行成功，步数: {agent.step_count}",
-                output_preview=f"执行成功，步数: {agent.step_count}",
+                output=result_container["result"] if result_container["result"] else f"执行成功，步数: {agent.step_count}",
+                output_preview=result_container["result"][:100] if result_container["result"] else f"执行成功，步数: {agent.step_count}",
                 steps_taken=agent.step_count
             )
 
