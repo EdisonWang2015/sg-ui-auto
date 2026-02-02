@@ -41,3 +41,6 @@ config/*.yaml
 # CSV 文件（包含敏感数据）
 examples/*.csv
 !examples/test_cases.csv
+
+# python环境切换
+venv

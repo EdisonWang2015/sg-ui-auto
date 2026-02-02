@@ -9,10 +9,11 @@ import argparse
 import sys
 import os
 import time
-from typing import Optional, List
+from typing import Optional, List, Union
 
 from test_config import load_config, TestFrameworkConfig
-from csv_case_manager import CSVCaseManager, APITestCase
+from unified_case_manager import UnifiedTestCaseManager
+from csv_case_manager import APITestCase
 from api_executor import APIExecutor, ExecutionResult
 from enhanced_validator import EnhancedValidator
 from dual_reporter_enhanced import DualReporter
@@ -91,7 +92,7 @@ class APITestRunner:
 
     def run_tests(
         self,
-        csv_file: str,
+        csv_files: Union[str, List[str]],
         tags: Optional[str] = None,
         test_type: Optional[str] = None,
         priority: Optional[str] = None,
@@ -103,7 +104,7 @@ class APITestRunner:
         运行测试
 
         Args:
-            csv_file: CSV测试用例文件
+            csv_files: CSV/Excel测试用例文件（支持单个文件路径或文件列表）
             tags: 标签筛选
             test_type: 类型筛选
             priority: 优先级筛选
@@ -117,9 +118,14 @@ class APITestRunner:
         print(f"AutoGLM API 测试运行器")
         print(f"{'='*60}\n")
 
-        # 1. 加载测试用例
-        print(f"正在加载测试用例: {csv_file}")
-        case_manager = CSVCaseManager(csv_file)
+        # 1. 加载测试用例（支持多文件）
+        if isinstance(csv_files, str):
+            files_str = csv_files
+        else:
+            files_str = ', '.join(csv_files)
+
+        print(f"正在加载测试用例: {files_str}")
+        case_manager = UnifiedTestCaseManager(csv_files)
         case_manager.show_summary()
 
         # 2. 筛选测试用例
@@ -301,28 +307,36 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 基本用法
-  python api_test_runner.py --csv 测试用例.csv
+  # 基本用法（CSV文件）
+  python api_test_runner.py --csv test_cases.csv
+
+  # 基本用法（Excel文件）
+  python api_test_runner.py --csv test_cases.xlsx
+
+  # 多文件支持（混合CSV和Excel）
+  python api_test_runner.py --csv test_cases.csv additional_cases.xlsx
 
   # 只运行smoke测试
-  python api_test_runner.py --csv 测试用例.csv --filter-tags smoke
+  python api_test_runner.py --csv test_cases.csv --filter-tags smoke
 
   # 指定设备和并发数
-  python api_test_runner.py --csv 测试用例.csv --device-id PQY5T20A07017811 --max-workers 2
+  python api_test_runner.py --csv test_cases.csv --device-id PQY5T20A07017811 --max-workers 2
 
   # 失败后继续执行
-  python api_test_runner.py --csv 测试用例.csv --continue-on-failure
+  python api_test_runner.py --csv test_cases.csv --continue-on-failure
 
   # 使用自定义配置文件
-  python api_test_runner.py --csv 测试用例.csv --config my_config.yaml
+  python api_test_runner.py --csv test_cases.csv --config my_config.yaml
         """
     )
 
     # 必需参数
     parser.add_argument(
         "--csv",
+        dest="csv_files",
+        nargs="+",
         required=True,
-        help="CSV测试用例文件路径"
+        help="测试用例文件路径（支持多个CSV/Excel文件）"
     )
 
     # 筛选参数
@@ -392,9 +406,12 @@ def main():
     if args.max_workers:
         config.execution.max_workers = args.max_workers
 
-    # 检查CSV文件是否存在
-    if not os.path.exists(args.csv):
-        print(f"❌ CSV文件不存在: {args.csv}")
+    # 检查测试用例文件是否存在
+    missing_files = [f for f in args.csv_files if not os.path.exists(f)]
+    if missing_files:
+        print(f"❌ 测试用例文件不存在:")
+        for f in missing_files:
+            print(f"  - {f}")
         sys.exit(1)
 
     # 检查API密钥
@@ -407,7 +424,7 @@ def main():
     # 运行测试
     try:
         result = runner.run_tests(
-            csv_file=args.csv,
+            csv_files=args.csv_files,
             tags=args.filter_tags,
             test_type=args.filter_type,
             priority=args.filter_priority,
