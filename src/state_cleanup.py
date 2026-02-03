@@ -120,8 +120,6 @@ class StateCleanupManager:
     def should_cleanup_before(self, test_case, device_id: str) -> bool:
         """判断是否应该在用例执行前清理
 
-        智能跳过5秒内的重复清理，优化执行效率。
-
         Args:
             test_case: APITestCase 测试用例对象
             device_id: 设备ID
@@ -144,14 +142,8 @@ class StateCleanupManager:
         if strategy == "custom":
             return True
 
-        # 智能跳过：同一设备5秒内的重复清理
-        current_time = time.time()
-        last_cleanup = self._last_cleanup_time.get(device_id, 0)
-
-        if current_time - last_cleanup < 5:
-            # 跳过清理（距离上次清理不到5秒）
-            return False
-
+        # 注意：已禁用智能跳过机制，确保每个用例都执行清理
+        # 这样可以保证每个测试用例都从完全干净的状态开始
         return True
 
     def _get_current_app_package(self, device_id: str) -> Optional[str]:
