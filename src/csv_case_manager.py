@@ -52,6 +52,12 @@ class CSVCaseManager(BaseTestReader):
                 # 支持多种超时列名
                 timeout_col = row.get('超时时间') or row.get('任务超时时间') or 180
 
+                # 新增：状态清理相关字段
+                cleanup_strategy = row.get('清理策略', 'inherit')
+                cleanup_steps = row.get('清理步骤', '') or None
+                require_clean_state_str = row.get('需要干净状态', 'false')
+                require_clean_state = require_clean_state_str.lower() in ('true', '1', 'yes', '是')
+
                 test_case = APITestCase(
                     test_id=test_id,
                     name=row.get('测试名称', ''),
@@ -63,7 +69,10 @@ class CSVCaseManager(BaseTestReader):
                     test_data=test_data,
                     device_id=row.get('设备ID', ''),
                     timeout=int(timeout_col) if timeout_col else 180,
-                    tags=tags
+                    tags=tags,
+                    cleanup_strategy=cleanup_strategy,
+                    cleanup_steps=cleanup_steps,
+                    require_clean_state=require_clean_state
                 )
                 self.test_cases.append(test_case)
 

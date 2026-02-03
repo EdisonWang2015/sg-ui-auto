@@ -24,6 +24,13 @@ class APITestCase:
     device_id: str                        # 设备ID
     timeout: int                          # 超时时间
     tags: List[str] = field(default_factory=list)  # 标签
+    depends_on: List[str] = field(default_factory=list)  # 依赖的用例ID列表
+    dependency_group: Optional[str] = None  # 依赖组标识
+
+    # 新增：状态清理相关字段
+    cleanup_strategy: str = "inherit"     # 清理策略: inherit/none/auto/custom
+    cleanup_steps: Optional[str] = None   # 自定义清理步骤（用 || 分隔）
+    require_clean_state: bool = False     # 是否需要干净起始状态
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
@@ -38,7 +45,14 @@ class APITestCase:
             "test_data": self.test_data,
             "device_id": self.device_id,
             "timeout": self.timeout,
-            "tags": self.tags
+            "tags": self.tags,
+            "depends_on": self.depends_on,
+            "dependency_group": self.dependency_group,
+            "cleanup_strategy": self.cleanup_strategy,
+            "cleanup_steps": self.cleanup_steps,
+            "require_clean_state": self.require_clean_state,
+            # 如果有original_device_id属性，也包含在字典中
+            **({"original_device_id": self.original_device_id} if hasattr(self, 'original_device_id') else {})
         }
 
 

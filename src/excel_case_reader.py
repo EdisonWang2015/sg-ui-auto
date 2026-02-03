@@ -132,6 +132,12 @@ class ExcelCaseReader(BaseTestReader):
         # 设备ID
         device_id = get_cell_value('设备ID', 10)
 
+        # 新增：状态清理相关字段
+        cleanup_strategy = get_cell_value('清理策略', 11, 'inherit')
+        cleanup_steps = get_cell_value('清理步骤', 12, '') or None
+        require_clean_state_str = get_cell_value('需要干净状态', 13, 'false')
+        require_clean_state = require_clean_state_str.lower() in ('true', '1', 'yes', '是')
+
         return APITestCase(
             test_id=test_id,
             name=name,
@@ -143,7 +149,10 @@ class ExcelCaseReader(BaseTestReader):
             test_data=test_data,
             device_id=device_id,
             timeout=timeout,
-            tags=tags
+            tags=tags,
+            cleanup_strategy=cleanup_strategy,
+            cleanup_steps=cleanup_steps,
+            require_clean_state=require_clean_state
         )
 
     def _parse_test_data(self, test_data_str: str) -> Dict[str, Any]:

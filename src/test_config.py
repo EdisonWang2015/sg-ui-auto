@@ -49,6 +49,7 @@ class ExecutionConfig:
     continue_on_failure: bool = False
     retry_on_failure: int = 0
     retry_delay: float = 1.0
+    failure_strategy: str = "stop_all"  # 失败处理策略: stop_all, stop_device, continue
 
 
 @dataclass
@@ -62,6 +63,17 @@ class ReportingConfig:
 
 
 @dataclass
+class CleanupConfig:
+    """状态清理配置"""
+    enabled: bool = True  # 是否启用自动清理
+    strategy: str = "auto_home"  # 清理策略: auto_home/custom/none
+    global_cleanup_steps: List[str] = field(default_factory=lambda: ["返回到应用首页"])
+    timeout: int = 30  # 清理超时时间（秒）
+    failure_mode: str = "warn"  # 清理失败处理: warn/error/ignore
+    app_specific: Dict[str, List[str]] = field(default_factory=dict)  # 应用特定配置
+
+
+@dataclass
 class TestFrameworkConfig:
     """Complete test framework configuration"""
     api: APIConfig = field(default_factory=APIConfig)
@@ -69,6 +81,7 @@ class TestFrameworkConfig:
     devices: List[DeviceConfig] = field(default_factory=list)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     reporting: ReportingConfig = field(default_factory=ReportingConfig)
+    cleanup: CleanupConfig = field(default_factory=CleanupConfig)
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TestFrameworkConfig":
@@ -116,7 +129,8 @@ class TestFrameworkConfig:
                 max_workers=exec_data.get("max_workers", config.execution.max_workers),
                 continue_on_failure=exec_data.get("continue_on_failure", config.execution.continue_on_failure),
                 retry_on_failure=exec_data.get("retry_on_failure", config.execution.retry_on_failure),
-                retry_delay=exec_data.get("retry_delay", config.execution.retry_delay)
+                retry_delay=exec_data.get("retry_delay", config.execution.retry_delay),
+                failure_strategy=exec_data.get("failure_strategy", config.execution.failure_strategy)
             )
 
         # Parse reporting config
@@ -128,6 +142,18 @@ class TestFrameworkConfig:
                 include_screenshots=report_data.get("include_screenshots", config.reporting.include_screenshots),
                 include_raw_output=report_data.get("include_raw_output", config.reporting.include_raw_output),
                 raw_output_max_length=report_data.get("raw_output_max_length", config.reporting.raw_output_max_length)
+            )
+
+        # Parse cleanup config
+        if "cleanup" in data:
+            cleanup_data = data["cleanup"]
+            config.cleanup = CleanupConfig(
+                enabled=cleanup_data.get("enabled", config.cleanup.enabled),
+                strategy=cleanup_data.get("strategy", config.cleanup.strategy),
+                global_cleanup_steps=cleanup_data.get("global_cleanup_steps", config.cleanup.global_cleanup_steps),
+                timeout=cleanup_data.get("timeout", config.cleanup.timeout),
+                failure_mode=cleanup_data.get("failure_mode", config.cleanup.failure_mode),
+                app_specific=cleanup_data.get("app_specific", config.cleanup.app_specific)
             )
 
         return config
@@ -154,7 +180,8 @@ class TestFrameworkConfig:
                 "max_workers": self.execution.max_workers,
                 "continue_on_failure": self.execution.continue_on_failure,
                 "retry_on_failure": self.execution.retry_on_failure,
-                "retry_delay": self.execution.retry_delay
+                "retry_delay": self.execution.retry_delay,
+                "failure_strategy": self.execution.failure_strategy
             },
             "reporting": {
                 "output_dir": self.reporting.output_dir,
@@ -162,6 +189,14 @@ class TestFrameworkConfig:
                 "include_screenshots": self.reporting.include_screenshots,
                 "include_raw_output": self.reporting.include_raw_output,
                 "raw_output_max_length": self.reporting.raw_output_max_length
+            },
+            "cleanup": {
+                "enabled": self.cleanup.enabled,
+                "strategy": self.cleanup.strategy,
+                "global_cleanup_steps": self.cleanup.global_cleanup_steps,
+                "timeout": self.cleanup.timeout,
+                "failure_mode": self.cleanup.failure_mode,
+                "app_specific": self.cleanup.app_specific
             }
         }
 

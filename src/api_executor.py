@@ -38,6 +38,13 @@ class ExecutionResult:
     validation_details: Dict[str, Any] = field(default_factory=dict)
     steps_taken: int = 0                 # 执行步数
     screenshot_path: str = ""            # 失败时的截图路径
+    original_device_id: str = ""         # 原始设备ID（用于追溯）
+
+    # 新增：清理信息字段
+    cleanup_executed: bool = False       # 是否执行了清理
+    cleanup_success: bool = True         # 清理是否成功
+    cleanup_time: float = 0.0            # 清理耗时（秒）
+    cleanup_warnings: List[str] = field(default_factory=list)  # 清理警告信息
 
 
 class OutputCapture:
@@ -76,11 +83,18 @@ class APIExecutor:
         """
         self.config = config
         self._agent_pool: Dict[str, PhoneAgent] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()  # 用于agent_pool的线程安全
+        # 设备级锁字典，每个设备独立锁，支持真正的并发执行
+        self._device_locks: Dict[str, threading.Lock] = {}
+        self._locks_lock = threading.Lock()  # 用于device_locks的线程安全
+
+        # 新增：清理管理器
+        from state_cleanup import StateCleanupManager
+        self.cleanup_manager = StateCleanupManager(config.cleanup)
 
     def _get_agent(self, device_id: str) -> PhoneAgent:
         """
-        获取或创建Agent实例（支持复用）
+        获取或创建Agent实例（支持复用和设备级并发）
 
         Args:
             device_id: 设备ID
@@ -88,7 +102,15 @@ class APIExecutor:
         Returns:
             PhoneAgent实例
         """
-        with self._lock:
+        # 确保设备有对应的锁
+        if device_id not in self._device_locks:
+            with self._locks_lock:
+                self._device_locks.setdefault(device_id, threading.Lock())
+
+        # 使用设备级锁而不是全局锁，支持不同设备并发访问
+        device_lock = self._device_locks[device_id]
+
+        with device_lock:
             if device_id not in self._agent_pool:
                 # 创建ModelConfig
                 model_config = ModelConfig(
@@ -134,6 +156,9 @@ class APIExecutor:
         start_time = time.time()
         start_time_str = time.strftime("%Y-%m-%d %H:%M:%S")
 
+        # 保存原始设备ID（用于追溯）
+        original_device_id = test_case.device_id
+
         print(f"\n{'='*60}")
         print(f"执行测试: {test_case.name} ({test_case.test_id})")
         print(f"类型: {test_case.type}")
@@ -145,6 +170,68 @@ class APIExecutor:
 
         if progress_callback:
             progress_callback(test_case.test_id, "开始执行")
+
+        # ========== 前置清理 ==========
+        cleanup_executed = False
+        cleanup_success = True
+        cleanup_time = 0.0
+        cleanup_warnings = []
+
+        if self.cleanup_manager.should_cleanup_before(test_case, test_case.device_id):
+            if progress_callback:
+                progress_callback(test_case.test_id, "执行状态清理")
+
+            agent = self._get_agent(test_case.device_id)
+
+            # 获取当前应用（用于应用特定配置）
+            try:
+                from phone_agent.device_factory import get_device_factory
+                device_factory = get_device_factory()
+                current_app = device_factory.get_current_app(test_case.device_id)
+                app_name = getattr(current_app, 'package_name', None)
+            except:
+                app_name = None
+
+            # 获取并执行清理步骤
+            cleanup_steps = self.cleanup_manager.get_cleanup_steps(test_case, app_name)
+
+            if cleanup_steps:
+                print(f"[清理] 执行 {len(cleanup_steps)} 个清理步骤")
+                cleanup_result = self.cleanup_manager.execute_cleanup(
+                    agent=agent,
+                    device_id=test_case.device_id,
+                    cleanup_steps=cleanup_steps,
+                    test_id=test_case.test_id
+                )
+
+                cleanup_executed = True
+                cleanup_success = cleanup_result.success
+                cleanup_time = cleanup_result.execution_time
+                cleanup_warnings = cleanup_result.warnings
+
+                # 处理清理失败
+                if not cleanup_result.success:
+                    if self.config.cleanup.failure_mode == "error":
+                        if progress_callback:
+                            progress_callback(test_case.test_id, f"状态清理失败")
+                        return ExecutionResult(
+                            test_id=test_case.test_id,
+                            test_name=test_case.name,
+                            status="ERROR",
+                            execution_time=time.time() - start_time,
+                            start_time=start_time_str,
+                            end_time=time.strftime("%Y-%m-%d %H:%M:%S"),
+                            device_id=test_case.device_id,
+                            original_device_id=original_device_id,
+                            error_message=f"状态清理失败: {cleanup_result.error_message}",
+                            cleanup_executed=cleanup_executed,
+                            cleanup_success=cleanup_success,
+                            cleanup_time=cleanup_time,
+                            cleanup_warnings=cleanup_warnings
+                        )
+                    # warn/ignore 模式记录警告但继续
+                    for warning in cleanup_warnings:
+                        print(f"[WARNING] {warning}")
 
         try:
             # 构造任务描述
@@ -203,7 +290,12 @@ class APIExecutor:
                     start_time=start_time_str,
                     end_time=time.strftime("%Y-%m-%d %H:%M:%S"),
                     device_id=test_case.device_id,
-                    error_message=f"执行超过{test_case.timeout}秒"
+                    original_device_id=original_device_id,
+                    error_message=f"执行超过{test_case.timeout}秒",
+                    cleanup_executed=cleanup_executed,
+                    cleanup_success=cleanup_success,
+                    cleanup_time=cleanup_time,
+                    cleanup_warnings=cleanup_warnings
                 )
 
             if result_container["error"]:
@@ -217,8 +309,13 @@ class APIExecutor:
                     start_time=start_time_str,
                     end_time=time.strftime("%Y-%m-%d %H:%M:%S"),
                     device_id=test_case.device_id,
+                    original_device_id=original_device_id,
                     error_message=result_container["error"],
-                    output=result_container.get("traceback", "")
+                    output=result_container.get("traceback", ""),
+                    cleanup_executed=cleanup_executed,
+                    cleanup_success=cleanup_success,
+                    cleanup_time=cleanup_time,
+                    cleanup_warnings=cleanup_warnings
                 )
 
             # 成功执行
@@ -235,9 +332,14 @@ class APIExecutor:
                 start_time=start_time_str,
                 end_time=time.strftime("%Y-%m-%d %H:%M:%S"),
                 device_id=test_case.device_id,
+                original_device_id=original_device_id,
                 output=result_container["result"] if result_container["result"] else f"执行成功，步数: {agent.step_count}",
                 output_preview=result_container["result"][:100] if result_container["result"] else f"执行成功，步数: {agent.step_count}",
-                steps_taken=agent.step_count
+                steps_taken=agent.step_count,
+                cleanup_executed=cleanup_executed,
+                cleanup_success=cleanup_success,
+                cleanup_time=cleanup_time,
+                cleanup_warnings=cleanup_warnings
             )
 
         except Exception as e:
@@ -251,7 +353,12 @@ class APIExecutor:
                 start_time=start_time_str,
                 end_time=time.strftime("%Y-%m-%d %H:%M:%S"),
                 device_id=test_case.device_id,
-                error_message=str(e)
+                original_device_id=original_device_id,
+                error_message=str(e),
+                cleanup_executed=cleanup_executed,
+                cleanup_success=cleanup_success,
+                cleanup_time=cleanup_time,
+                cleanup_warnings=cleanup_warnings
             )
 
     def execute_batch(
@@ -261,7 +368,7 @@ class APIExecutor:
         progress_callback: Optional[Callable[[str, str], None]] = None
     ) -> List[ExecutionResult]:
         """
-        批量执行测试用例（支持并发）
+        批量执行测试用例（支持真正的并发执行）
 
         Args:
             test_cases: 测试用例列表
@@ -284,32 +391,52 @@ class APIExecutor:
                     print(f"\n测试失败，停止执行")
                     break
         else:
-            # 使用线程池并发执行（按设备分组，避免设备冲突）
-            device_groups: Dict[str, List[APITestCase]] = {}
-            for tc in test_cases:
-                if tc.device_id not in device_groups:
-                    device_groups[tc.device_id] = []
-                device_groups[tc.device_id].append(tc)
+            # 【关键修改】不再按设备分组，直接提交所有用例到线程池
+            # 这样可以实现真正的跨设备并发执行
+            print(f"\n[并发执行] 提交 {len(test_cases)} 个任务到线程池（max_workers={max_workers}）")
 
-            # 按设备组并发执行
+            # 统计每个设备的任务数
+            device_task_count = {}
+            for tc in test_cases:
+                device_task_count[tc.device_id] = device_task_count.get(tc.device_id, 0) + 1
+
+            print(f"[任务分配] 按设备统计:")
+            for device_id, count in device_task_count.items():
+                print(f"  - {device_id}: {count} 个任务")
+
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {}
-                for device_id, device_test_cases in device_groups.items():
-                    for tc in device_test_cases:
-                        future = executor.submit(self.execute_test_case, tc, progress_callback)
-                        futures[future] = tc
 
+                # 直接提交所有用例到线程池
+                for tc in test_cases:
+                    print(f"[提交任务] {tc.test_id} -> 设备 {tc.device_id}")
+                    future = executor.submit(self.execute_test_case, tc, progress_callback)
+                    futures[future] = tc
+
+                # 收集结果
                 for future in as_completed(futures):
                     result = future.result()
                     results.append(result)
 
-                    # 失败后是否继续
-                    if result.status in ["ERROR", "TIMEOUT"] and not self.config.execution.continue_on_failure:
-                        # 取消剩余任务
-                        for f in futures:
-                            f.cancel()
-                        print(f"\n测试失败，停止执行")
-                        break
+                    # 失败处理逻辑（支持多种策略）
+                    if result.status in ["ERROR", "TIMEOUT"]:
+                        # 获取失败策略（默认从配置读取，可扩展为命令行参数）
+                        failure_strategy = getattr(self.config.execution, 'failure_strategy', 'stop_all')
+
+                        if failure_strategy == "stop_all":
+                            # 停止所有任务
+                            for f in futures:
+                                f.cancel()
+                            print(f"\n测试失败（策略: stop_all），停止所有执行")
+                            break
+                        elif failure_strategy == "stop_device":
+                            # 取消同一设备的剩余任务
+                            device_id = result.device_id
+                            for f, tc in futures.items():
+                                if tc.device_id == device_id and not f.done():
+                                    f.cancel()
+                            print(f"\n设备 {device_id} 测试失败（策略: stop_device），停止该设备剩余任务")
+                        # "continue" 策略不做任何处理，继续执行
 
         return results
 
