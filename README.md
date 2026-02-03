@@ -1,9 +1,10 @@
 # Open-AutoGLM 测试框架
 
-基于 Open-AutoGLM 的自动化测试框架，支持 CSV 测试用例管理、HTML+JSON 双格式报告生成。
+基于 Open-AutoGLM 的自动化测试框架，支持 CSV/Excel/Markdown 测试用例管理、HTML+JSON 双格式报告生成。
 
 ## 特性
 
+- **多格式测试用例管理**：支持 CSV、Excel、Markdown 三种格式，支持单文件多测试用例
 - **CSV/Excel 测试用例管理**：支持 CSV 和 Excel 文件管理测试用例，支持非技术人员使用
 - **直接 API 调用**：直接调用 PhoneAgent API，无需 subprocess，性能提升 30-50%
 - **状态隔离**：每个测试用例执行前自动清理应用状态，支持多种清理策略
@@ -40,6 +41,7 @@ cleanup:
   enabled: true
   strategy: "force_restart"    # 推荐使用强制重启策略
   failure_mode: "warn"         # warn/error/ignore
+  force_stop_delay: 2.0        # force-stop后延迟时间（秒），用于观察应用被杀掉、返回系统桌面的效果
 ```
 
 **状态清理策略说明：**
@@ -59,9 +61,9 @@ export AUTOGLM_API_KEY="your_api_key_here"
 
 ### 3. 准备测试用例
 
-参考 `examples/test_cases.xlsx` 或 `examples/test_cases.csv` 创建测试用例文件。
+参考 `examples/test_cases.xlsx`、`examples/test_cases.csv` 或 `examples/test_cases.md` 创建测试用例文件。
 
-**支持 CSV 和 Excel 两种格式：**
+**支持 CSV、Excel 和 Markdown 三种格式：**
 
 CSV 格式：
 
@@ -77,6 +79,38 @@ Excel 格式（推荐）：
 | TC001 | 测试登录 | 功能测试 | P1 | 设备已连接 | 打开应用并登录 | ✅登录成功 | DEVICE_ID | 180 | force_restart |
 | TC002 | 测试下单 | 功能测试 | P1 | 设备已连接 | 执行下单流程 | ✅下单成功 | DEVICE_ID | 180 | inherit |
 
+**Markdown 格式（推荐，支持单文件多用例）：**
+
+```markdown
+# 测试套件：功能测试
+
+## 用例：TC001 - 新建采购单
+
+| 字段 | 值 |
+|------|------|
+| 测试用例ID | TC001 |
+| 测试名称 | 新建采购单 |
+| 测试类型 | 采购单 |
+| 优先级 | P1 |
+| 标签 | smoke,regression |
+| 设备ID | PQY5T20A07017811 |
+| 超时时间 | 180 |
+
+**前置条件**：设备已连接，森果产地通应用已打开
+
+**测试步骤**：打开森果产地通应用，点击新建采购单，选择类目为"苹果"，农户选择"非伍6"，数量输入"1"，点击提交保存
+
+**预期结果**：✅任务完成 ✅操作成功 ✅保存成功
+
+**测试数据**：类目:苹果, 农户:非伍6, 数量:1
+
+---
+
+## 用例：TC002 - 编辑采购单
+
+...
+```
+
 **清理策略列说明：**
 - `inherit` - 继承全局配置（默认）
 - `force_restart` - 强制停止应用（推荐）
@@ -87,20 +121,23 @@ Excel 格式（推荐）：
 ### 4. 运行测试
 
 ```bash
-# 运行所有测试（支持 Excel 和 CSV）
-python src/api_test_runner.py --csv examples/test_cases.xlsx --config config/config.yaml
+# 运行所有测试（支持 CSV、Excel 和 Markdown）
+python src/api_test_runner.py --csv examples/test_cases.md --config config/config.yaml
 
 # 只运行 smoke 测试
-python src/api_test_runner.py --csv examples/test_cases.xlsx --filter-tags smoke
+python src/api_test_runner.py --csv examples/test_cases.md --filter-tags smoke
 
 # 多设备并发执行
-python src/api_test_runner.py --csv examples/test_cases.xlsx --max-workers 2 --force-allocate
+python src/api_test_runner.py --csv examples/test_cases.md --max-workers 2 --force-allocate
 
 # 指定设备运行
-python src/api_test_runner.py --csv examples/test_cases.xlsx --device-id YOUR_DEVICE_ID
+python src/api_test_runner.py --csv examples/test_cases.md --device-id YOUR_DEVICE_ID
 
 # 失败后继续执行
-python src/api_test_runner.py --csv examples/test_cases.xlsx --continue-on-failure
+python src/api_test_runner.py --csv examples/test_cases.md --continue-on-failure
+
+# 混合格式支持（CSV + Excel + Markdown）
+python src/api_test_runner.py --csv test_cases.csv test_cases.xlsx test_cases.md
 ```
 
 ### 5. 状态清理功能
@@ -162,6 +199,7 @@ sg-ui-auto/
 │   ├── api_test_runner.py      # 主控制器
 │   ├── csv_case_manager.py     # CSV 用例管理器
 │   ├── excel_case_reader.py    # Excel 用例读取器
+│   ├── markdown_case_reader.py # Markdown 用例读取器 ⭐
 │   ├── unified_case_manager.py # 统一用例管理器
 │   ├── api_executor.py         # API 执行引擎
 │   ├── state_cleanup.py        # 状态清理管理器 ⭐
@@ -172,7 +210,9 @@ sg-ui-auto/
 ├── config/                     # 配置文件
 │   └── config.yaml             # 框架配置
 ├── examples/                   # 示例文件
-│   └── test_cases.xlsx         # 示例测试用例（Excel）
+│   ├── test_cases.csv          # 示例测试用例（CSV）
+│   ├── test_cases.xlsx         # 示例测试用例（Excel）
+│   └── test_cases.md           # 示例测试用例（Markdown）⭐
 ├── docs/                       # 文档
 │   └── 完整文档.md             # 详细技术文档
 └── test_reports/               # 测试报告目录（自动创建）
@@ -186,7 +226,7 @@ sg-ui-auto/
 | 特性 | 优势 |
 |------|------|
 | 直接 API 调用 | 性能提升 30-50%，支持 Agent 实例复用 |
-| Excel/CSV 用例管理 | 非技术人员友好，易于维护 |
+| 多格式用例管理 | CSV/Excel/Markdown 三种格式，Markdown 支持单文件多用例 |
 | 状态隔离（force_restart） | 每个用例从干净状态开始，提升测试稳定性 |
 | 设备检查 | 运行前自动检查设备健康状态 |
 | 多设备并发 | 支持多设备并行执行，提高测试效率 |
@@ -196,7 +236,7 @@ sg-ui-auto/
 ## 命令行参数
 
 ```
---csv                  CSV/Excel 测试用例文件路径（必需）
+--csv                  CSV/Excel/Markdown 测试用例文件路径（必需）
 --config               配置文件路径（默认：config/config.yaml）
 --filter-tags          按标签筛选（逗号分隔）
 --filter-type          按类型筛选（purchase/sales/mixed）
@@ -212,9 +252,49 @@ sg-ui-auto/
 --verbose              详细输出
 ```
 
-## CSV/Excel 测试用例格式
+## CSV/Excel/Markdown 测试用例格式
 
-**支持 CSV 和 Excel 两种格式，推荐使用 Excel 格式。**
+**支持 CSV、Excel 和 Markdown 三种格式，推荐使用 Excel 或 Markdown 格式。**
+
+### Markdown 格式说明（推荐）
+
+**基本结构：**
+
+- **一级标题 (#)**：测试套件名称
+- **二级标题 (##)**：测试用例分隔符，支持以下格式：
+  - `## 用例：TC001 - 测试名称`
+  - `## TC001 - 测试名称`
+  - `## TC001`
+- **表格**：定义测试用例的元数据字段
+- **加粗字段**：定义前置条件、测试步骤、预期结果、测试数据
+
+**用例分隔符示例：**
+
+```markdown
+## 用例：TC001 - 新建采购单
+
+| 字段 | 值 |
+|------|------|
+| 测试用例ID | TC001 |
+| 测试名称 | 新建采购单 |
+| 测试类型 | 采购单 |
+| 优先级 | P1 |
+| 标签 | smoke,regression |
+| 设备ID | PQY5T20A07017811 |
+| 超时时间 | 180 |
+
+**前置条件**：设备已连接，森果产地通应用已打开
+
+**测试步骤**：打开森果产地通应用，点击新建采购单，选择类目为"苹果"，农户选择"非伍6"，数量输入"1"，点击提交保存
+
+**预期结果**：✅任务完成 ✅操作成功 ✅保存成功
+
+**测试数据**：类目:苹果, 农户:非伍6, 数量:1
+
+---
+```
+
+### CSV/Excel 格式说明
 
 | 列名 | 必填 | 说明 | 示例 |
 |------|------|------|------|
@@ -375,6 +455,10 @@ A: 在测试用例的 `清理策略` 列中填写 `none`，或设置 `需要干�
 ### Q: force_restart 策略会清空应用数据吗？
 
 A: `force_restart` 只停止应用进程，不会清除应用数据（如登录信息、缓存）。如需完全清除数据，可以修改清理步骤使用 `adb shell pm clear <package_name>`
+
+### Q: 为什么看不到应用被杀掉返回系统桌面的效果？
+
+A: 默认情况下，`force_restart` 执行后应用会立即重新启动，所以"返回系统桌面"的时间很短。如果需要观察应用被杀掉的效果，可以在 `config/config.yaml` 中设置 `force_stop_delay: 2.0`（延迟2秒），这样就能看到应用被杀掉后返回系统桌面的效果。生产环境建议设置为 0 以加快测试速度。
 
 ### Q: 如何提高测试执行速度？
 

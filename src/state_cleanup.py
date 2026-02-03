@@ -290,6 +290,12 @@ class StateCleanupManager:
                         if self._force_stop_app(device_id, package_name):
                             steps_completed += 1
 
+                            # 如果配置了延迟，等待一段时间让用户观察"返回系统桌面"的效果
+                            delay = self.config.force_stop_delay
+                            if delay > 0:
+                                print(f"[清理 {test_id}] 等待 {delay} 秒以观察应用被杀掉的效果...")
+                                time.sleep(delay)
+
                             # 可选：清除应用缓存（根据配置决定）
                             # 注意：清除缓存会更彻底，但可能导致应用需要重新登录
                             # self._clear_app_cache(device_id, package_name)

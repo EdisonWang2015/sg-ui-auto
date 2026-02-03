@@ -13,7 +13,7 @@ from test_reader_factory import create_test_reader
 class UnifiedTestCaseManager:
     """统一的测试用例管理器（支持多文件）"""
 
-    def __init__(self, file_paths: Union[str, List[str]]):
+    def __init__(self, file_paths: Union[str, List[str]], config=None):
         """
         支持从多个文件加载测试用例
 
@@ -21,7 +21,9 @@ class UnifiedTestCaseManager:
             file_paths: 文件路径或路径列表（支持混合CSV和Excel）
                        单个字符串：'/path/to/file.csv'
                        列表：['/path/to/file1.csv', '/path/to/file2.xlsx']
+            config: 测试框架配置（可选），用于传递给读取器
         """
+        self.config = config
         self.test_cases: List[APITestCase] = []
         self._load_from_files(file_paths)
 
@@ -41,7 +43,7 @@ class UnifiedTestCaseManager:
                     print(f"⚠️  警告: 文件不存在，跳过: {file_path}")
                     continue
 
-                reader = create_test_reader(file_path)
+                reader = create_test_reader(file_path, config=self.config)
                 cases_from_file = reader.get_all_test_cases()
                 self.test_cases.extend(cases_from_file)
                 loaded_count += 1

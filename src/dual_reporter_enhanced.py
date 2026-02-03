@@ -474,6 +474,161 @@ class DualReporterEnhanced:
         .toggle-icon.rotate {{
             transform: rotate(180deg);
         }}
+
+        /* 执行日志样式 */
+        .execution-log {{
+            margin-top: 15px;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            overflow: hidden;
+        }}
+
+        .log-header {{
+            background: #343a40;
+            color: white;
+            padding: 10px 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+        }}
+
+        .log-header:hover {{
+            background: #495057;
+        }}
+
+        .log-title {{
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+
+        .log-filters {{
+            display: flex;
+            gap: 10px;
+        }}
+
+        .log-filter-btn {{
+            padding: 4px 12px;
+            border: 1px solid rgba(255,255,255,0.3);
+            border-radius: 4px;
+            background: transparent;
+            color: white;
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: all 0.2s;
+        }}
+
+        .log-filter-btn:hover {{
+            background: rgba(255,255,255,0.1);
+        }}
+
+        .log-filter-btn.active {{
+            background: #667eea;
+            border-color: #667eea;
+        }}
+
+        .log-content {{
+            max-height: 400px;
+            overflow-y: auto;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 0.85em;
+            line-height: 1.6;
+            padding: 0;
+            display: none;
+        }}
+
+        .log-content.show {{
+            display: block;
+        }}
+
+        .log-entry {{
+            padding: 6px 15px;
+            border-bottom: 1px solid #2d2d2d;
+            display: flex;
+            gap: 15px;
+            transition: background 0.1s;
+        }}
+
+        .log-entry:hover {{
+            background: #252526;
+        }}
+
+        .log-entry.hidden {{
+            display: none;
+        }}
+
+        .log-timestamp {{
+            color: #858585;
+            flex-shrink: 0;
+            width: 70px;
+        }}
+
+        .log-elapsed {{
+            color: #569cd6;
+            flex-shrink: 0;
+            width: 60px;
+        }}
+
+        .log-level {{
+            flex-shrink: 0;
+            width: 70px;
+            font-weight: bold;
+            text-transform: uppercase;
+            font-size: 0.9em;
+        }}
+
+        .log-level.INFO {{
+            color: #4ec9b0;
+        }}
+
+        .log-level.DEBUG {{
+            color: #858585;
+        }}
+
+        .log-level.WARNING {{
+            color: #dcdcaa;
+        }}
+
+        .log-level.ERROR {{
+            color: #f44747;
+        }}
+
+        .log-level.AI {{
+            color: #c586c0;
+        }}
+
+        .log-message {{
+            flex: 1;
+            word-break: break-word;
+        }}
+
+        .log-actions {{
+            padding: 8px 15px;
+            background: #2d2d2d;
+            border-top: 1px solid #3e3e42;
+            display: flex;
+            gap: 10px;
+        }}
+
+        .log-action-btn {{
+            padding: 5px 12px;
+            border: 1px solid #3e3e42;
+            border-radius: 4px;
+            background: #1e1e1e;
+            color: #cccccc;
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: all 0.2s;
+        }}
+
+        .log-action-btn:hover {{
+            background: #3e3e42;
+            color: white;
+        }}
     </style>
 </head>
 <body>
@@ -610,6 +765,10 @@ class DualReporterEnhanced:
             if exec_result.get("validation_details"):
                 html += self._build_validation_html(exec_result["validation_details"])
 
+            # 添加执行日志
+            if exec_result.get("execution_log"):
+                html += self._build_execution_log_html(exec_result["execution_log"], i)
+
             html += """
                 </div>
             </div>
@@ -635,6 +794,89 @@ class DualReporterEnhanced:
                 body.classList.add('show');
                 icon.classList.add('rotate');
             }
+        }
+
+        // 日志相关函数
+        function toggleLog(index) {
+            const content = document.getElementById('log-content-' + index);
+            const icon = document.getElementById('log-icon-' + index);
+
+            if (content.classList.contains('show')) {
+                content.classList.remove('show');
+                icon.textContent = '▶';
+            } else {
+                content.classList.add('show');
+                icon.textContent = '▼';
+            }
+        }
+
+        function filterLog(index, level) {
+            const content = document.getElementById('log-content-' + index);
+            const entries = content.querySelectorAll('.log-entry');
+            const buttons = content.parentElement.querySelectorAll('.log-filter-btn');
+
+            // 更新按钮状态
+            buttons.forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+
+            // 筛选日志条目
+            entries.forEach(entry => {
+                if (level === 'all') {
+                    entry.classList.remove('hidden');
+                } else {
+                    const entryLevel = entry.getAttribute('data-level');
+                    if (entryLevel === level) {
+                        entry.classList.remove('hidden');
+                    } else {
+                        entry.classList.add('hidden');
+                    }
+                }
+            });
+        }
+
+        function copyLog(index) {
+            const content = document.getElementById('log-content-' + index);
+            const entries = content.querySelectorAll('.log-entry:not(.hidden)');
+
+            let logText = '';
+            entries.forEach(entry => {
+                const timestamp = entry.querySelector('.log-timestamp').textContent;
+                const elapsed = entry.querySelector('.log-elapsed').textContent;
+                const level = entry.querySelector('.log-level').textContent;
+                const message = entry.querySelector('.log-message').textContent;
+                logText += `${timestamp} ${elapsed} ${level} ${message}\\n`;
+            });
+
+            navigator.clipboard.writeText(logText).then(() => {
+                alert('日志已复制到剪贴板');
+            }).catch(err => {
+                console.error('复制失败:', err);
+                alert('复制失败，请手动选择复制');
+            });
+        }
+
+        function downloadLog(index, testId) {
+            const content = document.getElementById('log-content-' + index);
+            const entries = content.querySelectorAll('.log-entry');
+
+            let logText = '';
+            entries.forEach(entry => {
+                const timestamp = entry.querySelector('.log-timestamp').textContent;
+                const elapsed = entry.querySelector('.log-elapsed').textContent;
+                const level = entry.querySelector('.log-level').textContent;
+                const message = entry.querySelector('.log-message').textContent;
+                logText += `${timestamp} ${elapsed} ${level} ${message}\\n`;
+            });
+
+            const blob = new Blob([logText], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `test_log_${testId}_${new Date().getTime()}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
         }
 
         // 默认展开失败/错误的测试
@@ -664,6 +906,69 @@ class DualReporterEnhanced:
             '''
 
         html += '</div>'
+        return html
+
+    def _build_execution_log_html(self, execution_log: List[Dict[str, str]], test_index: int) -> str:
+        """
+        构建执行日志HTML
+
+        Args:
+            execution_log: 执行日志列表
+            test_index: 测试索引（用于生成唯一ID）
+
+        Returns:
+            HTML字符串
+        """
+        if not execution_log:
+            return ""
+
+        html = f'<div class="execution-log">'
+        html += f'''
+        <div class="log-header" onclick="toggleLog({test_index})">
+            <div class="log-title">
+                <span id="log-icon-{test_index}">▶</span>
+                <span>执行日志 ({len(execution_log)} 条)</span>
+            </div>
+            <div class="log-filters" onclick="event.stopPropagation()">
+                <button class="log-filter-btn active" onclick="filterLog({test_index}, 'all')">全部</button>
+                <button class="log-filter-btn" onclick="filterLog({test_index}, 'INFO')">INFO</button>
+                <button class="log-filter-btn" onclick="filterLog({test_index}, 'DEBUG')">DEBUG</button>
+                <button class="log-filter-btn" onclick="filterLog({test_index}, 'WARNING')">WARNING</button>
+                <button class="log-filter-btn" onclick="filterLog({test_index}, 'ERROR')">ERROR</button>
+                <button class="log-filter-btn" onclick="filterLog({test_index}, 'AI')">AI</button>
+            </div>
+        </div>
+        <div class="log-content" id="log-content-{test_index}">
+'''
+
+        for log_entry in execution_log:
+            timestamp = log_entry.get("timestamp", "")
+            elapsed = log_entry.get("elapsed", "")
+            level = log_entry.get("level", "INFO")
+            message = log_entry.get("message", "")
+
+            # 转义HTML特殊字符
+            import html as html_module
+            message = html_module.escape(message)
+
+            html += f'''
+            <div class="log-entry" data-level="{level}">
+                <span class="log-timestamp">{timestamp}</span>
+                <span class="log-elapsed">+{elapsed}</span>
+                <span class="log-level {level}">[{level}]</span>
+                <span class="log-message">{message}</span>
+            </div>
+'''
+
+        html += f'''
+            <div class="log-actions">
+                <button class="log-action-btn" onclick="copyLog({test_index})">复制日志</button>
+                <button class="log-action-btn" onclick="downloadLog({test_index}, '{test_index}')">下载日志</button>
+            </div>
+        </div>
+    </div>
+'''
+
         return html
 
     def _generate_device_error_html(self, report_data: Dict[str, Any], output_path: str):

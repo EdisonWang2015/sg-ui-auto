@@ -71,6 +71,7 @@ class CleanupConfig:
     timeout: int = 30  # 清理超时时间（秒）
     failure_mode: str = "warn"  # 清理失败处理: warn/error/ignore
     app_specific: Dict[str, List[str]] = field(default_factory=dict)  # 应用特定配置
+    force_stop_delay: float = 0.0  # force-stop后延迟时间（秒），用于观察应用被杀掉的效果
 
 
 @dataclass
@@ -153,7 +154,8 @@ class TestFrameworkConfig:
                 global_cleanup_steps=cleanup_data.get("global_cleanup_steps", config.cleanup.global_cleanup_steps),
                 timeout=cleanup_data.get("timeout", config.cleanup.timeout),
                 failure_mode=cleanup_data.get("failure_mode", config.cleanup.failure_mode),
-                app_specific=cleanup_data.get("app_specific", config.cleanup.app_specific)
+                app_specific=cleanup_data.get("app_specific", config.cleanup.app_specific),
+                force_stop_delay=cleanup_data.get("force_stop_delay", config.cleanup.force_stop_delay)
             )
 
         return config

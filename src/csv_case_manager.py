@@ -14,15 +14,17 @@ from base_test_reader import BaseTestReader, APITestCase
 class CSVCaseManager(BaseTestReader):
     """CSV测试用例管理器"""
 
-    def __init__(self, csv_file: str):
+    def __init__(self, csv_file: str, config=None):
         """
         初始化CSV测试用例管理器
 
         Args:
             csv_file: CSV文件路径
+            config: 测试框架配置（可选）
         """
         self.csv_file = csv_file
         self.test_cases: List[APITestCase] = []
+        self.config = config
         self._load_test_cases()
 
     def _load_test_cases(self):

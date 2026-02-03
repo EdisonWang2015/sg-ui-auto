@@ -118,12 +118,28 @@ class ExcelCaseReader(BaseTestReader):
 
         # 支持多种超时列名
         timeout_idx = col_mapping.get('超时时间') or col_mapping.get('任务超时时间')
-        timeout = 180  # 默认值
-        if timeout_idx is not None and timeout_idx < len(row) and row[timeout_idx]:
+        # 使用配置的默认超时时间，如果没有配置则使用180秒
+        default_timeout = 180
+        if self.config and hasattr(self.config, 'agent') and hasattr(self.config.agent, 'default_timeout'):
+            default_timeout = self.config.agent.default_timeout
+
+        timeout = default_timeout  # 默认值
+        if timeout_idx is not None and timeout_idx < len(row) and row[timeout_idx] is not None:
             try:
-                timeout = int(row[timeout_idx])
+                timeout_value = row[timeout_idx]
+                # 处理可能的字符串或数字类型
+                if isinstance(timeout_value, str):
+                    timeout_value = timeout_value.strip()
+                    if timeout_value:  # 非空字符串
+                        timeout = int(timeout_value)
+                    else:
+                        timeout = default_timeout  # 空字符串使用默认值
+                elif isinstance(timeout_value, (int, float)):
+                    timeout = int(timeout_value)
+                else:
+                    timeout = default_timeout  # None或其他类型使用默认值
             except (ValueError, TypeError):
-                timeout = 180
+                timeout = default_timeout  # 转换失败使用默认值
 
         # 解析标签（逗号分隔）
         tags_str = get_cell_value('标签', 9)

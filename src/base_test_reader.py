@@ -59,14 +59,16 @@ class APITestCase:
 class BaseTestReader(ABC):
     """测试用例读取器抽象基类"""
 
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, config=None):
         """
         初始化测试用例读取器
 
         Args:
             file_path: 测试用例文件路径
+            config: 测试框架配置（可选），用于获取默认超时时间等配置
         """
         self.file_path = file_path
+        self.config = config
         self.test_cases: List[APITestCase] = []
         self._load_test_cases()
 
