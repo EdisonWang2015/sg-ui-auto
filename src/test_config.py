@@ -217,16 +217,29 @@ def load_config(config_path: Optional[str] = None) -> TestFrameworkConfig:
     Returns:
         TestFrameworkConfig instance
     """
-    if config_path and os.path.exists(config_path):
-        return TestFrameworkConfig.from_yaml(config_path)
-    else:
-        # Check for default config file
-        default_config = "test_runner_config.yaml"
-        if os.path.exists(default_config):
-            return TestFrameworkConfig.from_yaml(default_config)
+    # 如果用户明确指定了配置文件路径
+    if config_path:
+        if os.path.exists(config_path):
+            return TestFrameworkConfig.from_yaml(config_path)
+        else:
+            print(f"⚠️  警告: 指定的配置文件不存在: {config_path}")
+            return TestFrameworkConfig()
 
-        # Return default configuration
-        return TestFrameworkConfig()
+    # 尝试查找默认配置文件（按优先级顺序）
+    default_config_paths = [
+        "config/config.yaml",           # 项目根目录下的 config/config.yaml
+        "config.yaml",                  # 项目根目录下的 config.yaml
+        "test_runner_config.yaml",      # 当前目录下的 test_runner_config.yaml
+    ]
+
+    for default_path in default_config_paths:
+        if os.path.exists(default_path):
+            print(f"📋 使用默认配置文件: {default_path}")
+            return TestFrameworkConfig.from_yaml(default_path)
+
+    # 未找到配置文件，使用默认配置
+    print("📋 未找到配置文件，使用默认配置")
+    return TestFrameworkConfig()
 
 
 # Default configuration (used when no config file is found)

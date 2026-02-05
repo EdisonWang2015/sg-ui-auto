@@ -30,7 +30,10 @@ class APITestRunner:
             config: 测试框架配置
         """
         self.config = config
-        self.executor = APIExecutor(config)
+        # 导入 DeviceService
+        from device_service import DeviceService
+        self.device_service = DeviceService(config)
+        self.executor = APIExecutor(config, self.device_service)
         self.validator = EnhancedValidator("default")
         self.reporter = DualReporter(config.reporting.output_dir)
 
@@ -41,54 +44,68 @@ class APITestRunner:
         Returns:
             设备检查结果字典
         """
-        import subprocess
-        from phone_agent.device_factory import get_device_factory
+        result = self.device_service.check_devices()
 
-        result = {
-            "available": False,
-            "devices": [],
-            "errors": []
+        # 转换为旧格式以保持向后兼容
+        return {
+            "available": result.available,
+            "devices": [
+                {
+                    "device_id": d.device_id,
+                    "status": d.status,
+                    "model": d.model,
+                    "name": d.name,
+                    "screenshot_ok": d.screenshot_ok
+                }
+                for d in result.devices
+            ],
+            "errors": result.errors
         }
 
-        try:
-            device_factory = get_device_factory()
-            devices = device_factory.list_devices()
+    def _validate_test_cases_before_execution(self, test_cases: List[APITestCase]):
+        """
+        执行前验证测试用例
+        检查指令长度、操作步骤数等，给出警告或自动拆分
+        """
+        from test_case_validator import TestCaseValidator, ComplexityLevel
 
-            if not devices:
-                result["errors"].append("未找到已连接的设备")
-                return result
+        validator = TestCaseValidator(config=self.config)
+        total_warnings = 0
+        over_complex_count = 0
+        auto_split_count = 0
 
-            for device in devices:
-                device_info = {
-                    "device_id": device.device_id,
-                    "status": device.status,
-                    "model": getattr(device, 'model', 'Unknown'),
-                    "name": getattr(device, 'device_name', 'Unknown')
-                }
+        for tc in test_cases:
+            # 保存原始指令
+            if not hasattr(tc, 'original_command') or not tc.original_command:
+                tc.original_command = tc.task_command
 
-                if device.status != "device":
-                    result["errors"].append(f"设备 {device.device_id} 状态异常: {device.status}")
-                else:
-                    # 测试截图功能是否正常
-                    try:
-                        screenshot = device_factory.get_screenshot(device.device_id)
-                        device_info["screenshot_ok"] = True
-                    except Exception as e:
-                        device_info["screenshot_ok"] = False
-                        result["errors"].append(f"设备 {device.device_id} 截图失败: {str(e)}")
+            # 分析指令
+            analysis = validator.analyze_command(tc.task_command)
 
-                result["devices"].append(device_info)
+            # 输出警告
+            if analysis.warnings:
+                total_warnings += len(analysis.warnings)
+                print(f"  ⚠️  {tc.test_id}: {', '.join(analysis.warnings)}")
 
-            # 只要有至少一个可用设备就返回成功
-            result["available"] = any(
-                d["status"] == "device" and d.get("screenshot_ok", False)
-                for d in result["devices"]
-            )
+            # 统计过于复杂的用例
+            if analysis.estimated_complexity == ComplexityLevel.OVER_COMPLEX:
+                over_complex_count += 1
 
-        except Exception as e:
-            result["errors"].append(f"设备检查异常: {str(e)}")
+            # 如果配置了自动拆分且可以拆分
+            if self.config.execution.auto_split and analysis.can_split and analysis.suggested_splits:
+                tc.auto_split_commands = analysis.suggested_splits
+                auto_split_count += 1
+                print(f"  📝 {tc.test_id}: 自动拆分为 {len(analysis.suggested_splits)} 个子指令")
 
-        return result
+        # 输出汇总
+        if total_warnings > 0:
+            print(f"\n[校验汇总] 发现 {total_warnings} 个潜在问题")
+            if over_complex_count > 0:
+                print(f"  - {over_complex_count} 个用例过于复杂，建议拆分")
+            if auto_split_count > 0:
+                print(f"  - {auto_split_count} 个用例已自动拆分")
+        else:
+            print(f"✅ 所有测试用例校验通过")
 
     def _resolve_dependencies(self, test_cases: List[APITestCase]) -> List[List[APITestCase]]:
         """
@@ -198,6 +215,11 @@ class APITestRunner:
             return {"success": False, "message": "没有匹配的测试用例"}
 
         print(f"\n筛选后将执行 {len(test_cases)} 个测试用例")
+
+        # 2.5 执行前校验测试用例（如果配置启用）
+        if self.config.execution.validate_commands:
+            print(f"\n[测试用例校验]")
+            self._validate_test_cases_before_execution(test_cases)
 
         # 3. 设备检查
         if not skip_device_check:
@@ -516,8 +538,8 @@ def main():
     parser.add_argument(
         "--on-failure",
         choices=["stop_all", "stop_device", "continue"],
-        default="stop_all",
-        help="失败处理策略（默认: stop_all）"
+        default=None,
+        help="失败处理策略（默认: 使用配置文件值）"
     )
 
     # 配置参数
@@ -527,8 +549,8 @@ def main():
     )
     parser.add_argument(
         "--output-dir",
-        default="test_reports",
-        help="报告输出目录（默认: test_reports）"
+        default=None,
+        help="报告输出目录（默认: 使用配置文件值）"
     )
 
     # 其他参数
@@ -544,15 +566,14 @@ def main():
     config = load_config(args.config)
 
     # 命令行参数覆盖配置（只有当用户明确指定时才覆盖）
-    if args.output_dir:
+    if args.output_dir is not None:
         config.reporting.output_dir = args.output_dir
     if args.continue_on_failure:
         config.execution.continue_on_failure = True
-    if args.max_workers is not None:  # 使用 is not None 而不是直接 if args.max_workers
+    if args.max_workers is not None:
         config.execution.max_workers = args.max_workers
-
-    # 失败策略
-    config.execution.failure_strategy = args.on_failure
+    if args.on_failure is not None:
+        config.execution.failure_strategy = args.on_failure
 
     # 创建设备分配器
     from device_allocator import DeviceAllocator, AllocationStrategy
@@ -573,7 +594,7 @@ def main():
     print(f"\n[设备分配器配置]")
     print(f"  分配策略: {args.allocation_strategy}")
     print(f"  强制分配: {'是' if args.force_allocate else '否（保留亲和性）'}")
-    print(f"  失败策略: {args.on_failure}")
+    print(f"  失败策略: {config.execution.failure_strategy}")
     available_devices = allocator.get_available_devices()
     print(f"  检测到设备: {len(available_devices)}个")
     for device_id in available_devices:
@@ -613,7 +634,7 @@ def main():
             test_type=args.filter_type,
             priority=args.filter_priority,
             device_id=args.device_id,
-            max_workers=args.max_workers,
+            max_workers=config.execution.max_workers,
             skip_device_check=args.skip_device_check,
             allocator=allocator
         )
