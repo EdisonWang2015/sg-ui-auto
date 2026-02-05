@@ -8,7 +8,7 @@ API执行引擎
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, Tuple
 from dataclasses import dataclass, field
 from io import StringIO
 import sys
@@ -19,6 +19,7 @@ from phone_agent.model import ModelConfig
 
 from test_config import TestFrameworkConfig, APIConfig, AgentConfig as TestAgentConfig
 from csv_case_manager import APITestCase
+from adb_lock import ADBLockManager, get_adb_lock_manager
 
 
 @dataclass
@@ -48,6 +49,9 @@ class ExecutionResult:
 
     # 新增：执行日志字段
     execution_log: List[Dict[str, str]] = field(default_factory=list)  # 执行日志
+
+    # 新增：AI 思考过程字段
+    thinking_process: List[Dict[str, Any]] = field(default_factory=list)  # AI 每步的思考过程
 
 
 class OutputCapture:
@@ -133,23 +137,153 @@ class TestLogger:
 class APIExecutor:
     """API执行引擎 - 直接调用PhoneAgent"""
 
-    def __init__(self, config: TestFrameworkConfig):
+    def __init__(self, config: TestFrameworkConfig, device_service=None):
         """
         初始化API执行引擎
 
         Args:
             config: 测试框架配置
+            device_service: DeviceService 实例（可选，用于依赖注入）
         """
         self.config = config
-        self._agent_pool: Dict[str, PhoneAgent] = {}
-        self._lock = threading.Lock()  # 用于agent_pool的线程安全
-        # 设备级锁字典，每个设备独立锁，支持真正的并发执行
-        self._device_locks: Dict[str, threading.Lock] = {}
-        self._locks_lock = threading.Lock()  # 用于device_locks的线程安全
+        self.device_service = device_service
 
-        # 新增：清理管理器
+        # 使用 AgentPoolManager 管理 Agent 生命周期
+        from agent_pool_manager import AgentPoolManager
+        self.agent_pool_manager = AgentPoolManager(config)
+
+        # 新增：ADB 锁管理器（防止并发 ADB 调用冲突）
+        self.adb_lock_manager = get_adb_lock_manager()
+        self._adb_lock_enabled = getattr(config.execution, 'adb_lock_enabled', True)
+
+        # 新增：清理管理器（传入 device_service）
         from state_cleanup import StateCleanupManager
-        self.cleanup_manager = StateCleanupManager(config.cleanup)
+        self.cleanup_manager = StateCleanupManager(config.cleanup, device_service)
+
+    def _get_device_service(self):
+        """获取 DeviceService（延迟加载）"""
+        if self.device_service is None:
+            from device_service import DeviceService
+            self.device_service = DeviceService(self.config)
+        return self.device_service
+
+    def _infer_target_app_name(self, test_case: APITestCase) -> Optional[str]:
+        """从测试描述中推断目标应用名称（用于前置复位）"""
+        try:
+            from phone_agent.config.apps import APP_PACKAGES
+        except Exception:
+            return None
+
+        text = f"{test_case.preconditions or ''} {test_case.task_command or ''}"
+        if not text.strip():
+            return None
+
+        candidates = [name for name in APP_PACKAGES.keys() if name in text]
+        if not candidates:
+            return None
+
+        # 选择最长匹配（避免子串误匹配）
+        candidates.sort(key=len, reverse=True)
+        return candidates[0]
+
+    def _is_system_package(self, package_name: str, system_packages: List[str]) -> bool:
+        """判断是否为系统包（避免误杀桌面/系统UI）"""
+        if not package_name:
+            return True
+        for pkg in system_packages:
+            if package_name == pkg or package_name.startswith(pkg):
+                return True
+        return False
+
+    def _preflight_prepare_device(
+        self, test_case: APITestCase, logger: TestLogger
+    ) -> Tuple[bool, str]:
+        """用例前置复位：回桌面、清理干扰App、启动目标App并验证前台"""
+        preflight = getattr(self.config, "preflight", None)
+        if not preflight or not preflight.enabled:
+            return True, ""
+
+        device_id = test_case.device_id
+        device_service = self._get_device_service()
+
+        try:
+            from phone_agent.device_factory import get_device_factory
+            device_factory = get_device_factory()
+        except Exception as e:
+            return False, f"获取设备工厂失败: {str(e)}"
+
+        # 目标应用名/包名
+        target_app_name = preflight.target_app_name or self._infer_target_app_name(test_case)
+        target_package = preflight.target_package
+        if target_app_name and not target_package:
+            try:
+                from phone_agent.config.apps import APP_PACKAGES
+                target_package = APP_PACKAGES.get(target_app_name)
+            except Exception:
+                target_package = None
+
+        logger.info(
+            f"前置复位: target_app_name={target_app_name or '未识别'} "
+            f"target_package={target_package or '未知'}"
+        )
+
+        # 回桌面
+        if preflight.home_before_start:
+            try:
+                device_factory.home(device_id)
+                time.sleep(0.5)
+            except Exception as e:
+                return False, f"回桌面失败: {str(e)}"
+
+        # 强杀当前前台（非系统）
+        if preflight.force_stop_foreground:
+            try:
+                current_pkg = device_service.get_current_app(device_id)
+                if current_pkg and not self._is_system_package(current_pkg, preflight.system_packages):
+                    if target_package and current_pkg == target_package and not preflight.always_force_stop_target:
+                        pass
+                    else:
+                        device_service.force_stop_app(device_id, current_pkg)
+                        logger.info(f"前置复位: 已强杀前台应用 {current_pkg}")
+            except Exception as e:
+                logger.warning(f"前置复位: 获取/强杀前台应用失败: {str(e)}")
+
+        # 强杀黑名单应用
+        for pkg in preflight.blacklisted_packages:
+            try:
+                device_service.force_stop_app(device_id, pkg)
+            except Exception:
+                # 黑名单非关键路径
+                pass
+
+        # 强制停止目标应用
+        if preflight.always_force_stop_target and target_package:
+            try:
+                device_service.force_stop_app(device_id, target_package)
+            except Exception as e:
+                logger.warning(f"前置复位: 强杀目标应用失败: {str(e)}")
+
+        # 启动目标应用
+        if target_app_name:
+            launched = device_factory.launch_app(target_app_name, device_id)
+            if not launched:
+                return False, f"启动目标应用失败: {target_app_name}"
+            if preflight.wait_after_launch > 0:
+                time.sleep(preflight.wait_after_launch)
+        else:
+            logger.warning("前置复位: 未识别目标应用，跳过启动步骤")
+
+        # 验证前台应用
+        if preflight.verify_foreground and target_package:
+            start_time = time.time()
+            while time.time() - start_time < preflight.verify_timeout:
+                current_pkg = device_service.get_current_app(device_id)
+                if current_pkg == target_package:
+                    return True, ""
+                time.sleep(0.5)
+            return False, f"前置复位超时：前台应用非目标应用 ({current_pkg})"
+
+        return True, ""
 
     def _get_agent(self, device_id: str) -> PhoneAgent:
         """
@@ -161,41 +295,7 @@ class APIExecutor:
         Returns:
             PhoneAgent实例
         """
-        # 确保设备有对应的锁
-        if device_id not in self._device_locks:
-            with self._locks_lock:
-                self._device_locks.setdefault(device_id, threading.Lock())
-
-        # 使用设备级锁而不是全局锁，支持不同设备并发访问
-        device_lock = self._device_locks[device_id]
-
-        with device_lock:
-            if device_id not in self._agent_pool:
-                # 创建ModelConfig
-                model_config = ModelConfig(
-                    base_url=self.config.api.base_url,
-                    model_name=self.config.api.model_name,
-                    api_key=self.config.api.api_key,
-                    lang=self.config.agent.lang
-                )
-
-                # 创建AgentConfig
-                agent_config = AgentConfig(
-                    max_steps=self.config.agent.max_steps,
-                    device_id=device_id,
-                    verbose=self.config.agent.verbose,
-                    lang=self.config.agent.lang
-                )
-
-                # 创建PhoneAgent实例
-                agent = PhoneAgent(
-                    model_config=model_config,
-                    agent_config=agent_config
-                )
-
-                self._agent_pool[device_id] = agent
-
-            return self._agent_pool[device_id]
+        return self.agent_pool_manager.get_agent(device_id)
 
     def execute_test_case(
         self,
@@ -303,10 +403,56 @@ class APIExecutor:
                             cleanup_warnings=cleanup_warnings,
                             execution_log=logger.get_logs()
                         )
-                    # warn/ignore 模式记录警告但继续
-                    for warning in cleanup_warnings:
-                        logger.warning(f"清理警告: {warning}")
-                        print(f"[WARNING] {warning}")
+                # warn/ignore 模式记录警告但继续
+                for warning in cleanup_warnings:
+                    logger.warning(f"清理警告: {warning}")
+                    print(f"[WARNING] {warning}")
+
+        # ========== 前置复位（确保稳定入口） ==========
+        try:
+            preflight_ok, preflight_error = self._preflight_prepare_device(test_case, logger)
+            if not preflight_ok:
+                logger.error(f"前置复位失败: {preflight_error}")
+                if getattr(self.config.preflight, "fail_on_preflight_error", True):
+                    if progress_callback:
+                        progress_callback(test_case.test_id, "前置复位失败")
+                    return ExecutionResult(
+                        test_id=test_case.test_id,
+                        test_name=test_case.name,
+                        status="ERROR",
+                        execution_time=time.time() - start_time,
+                        start_time=start_time_str,
+                        end_time=time.strftime("%Y-%m-%d %H:%M:%S"),
+                        device_id=test_case.device_id,
+                        original_device_id=original_device_id,
+                        error_message=f"前置复位失败: {preflight_error}",
+                        cleanup_executed=cleanup_executed,
+                        cleanup_success=cleanup_success,
+                        cleanup_time=cleanup_time,
+                        cleanup_warnings=cleanup_warnings,
+                        execution_log=logger.get_logs()
+                    )
+        except Exception as e:
+            logger.error(f"前置复位异常: {str(e)}")
+            if getattr(self.config.preflight, "fail_on_preflight_error", True):
+                if progress_callback:
+                    progress_callback(test_case.test_id, "前置复位异常")
+                return ExecutionResult(
+                    test_id=test_case.test_id,
+                    test_name=test_case.name,
+                    status="ERROR",
+                    execution_time=time.time() - start_time,
+                    start_time=start_time_str,
+                    end_time=time.strftime("%Y-%m-%d %H:%M:%S"),
+                    device_id=test_case.device_id,
+                    original_device_id=original_device_id,
+                    error_message=f"前置复位异常: {str(e)}",
+                    cleanup_executed=cleanup_executed,
+                    cleanup_success=cleanup_success,
+                    cleanup_time=cleanup_time,
+                    cleanup_warnings=cleanup_warnings,
+                    execution_log=logger.get_logs()
+                )
 
         try:
             # 构造任务描述
@@ -316,8 +462,8 @@ class APIExecutor:
                 data_str = ", ".join([f"{k}:{v}" for k, v in test_case.test_data.items()])
                 task_description = f"[测试数据参考: {data_str}] 任务: {test_case.task_command}"
 
-            logger.info(f"任务描述: {task_description[:100]}{'...' if len(task_description) > 100 else ''}")
-            logger.ai_interaction(f"发送任务给AutoGLM: {task_description[:200]}")
+            logger.info(f"任务描述: {task_description}")
+            logger.ai_interaction(f"发送任务给AutoGLM: {task_description}")
 
             # 获取Agent实例
             agent = self._get_agent(test_case.device_id)
@@ -333,29 +479,132 @@ class APIExecutor:
             result_container = {"result": None, "error": None, "finished": False, "output": ""}
 
             def run_agent():
+                # 获取设备级ADB锁（防止同一设备的并发ADB调用冲突）
+                # 【方案二改进】不同设备使用独立的锁，可以实现真正的跨设备并发
+                adb_lock = None
+                if self._adb_lock_enabled:
+                    device_lock_name = f"device_{test_case.device_id}"
+                    adb_lock = self.adb_lock_manager.get_lock(device_lock_name)
+                    lock_time = time.strftime("%H:%M:%S", time.localtime())
+                    print(f"[{lock_time}] [设备锁] {test_case.test_id} 等待设备锁: {device_lock_name}")
+                    logger.debug(f"获取设备级ADB锁: {device_lock_name}")
+                    try:
+                        adb_lock.acquire(timeout=60)
+                        lock_acquired_time = time.strftime("%H:%M:%S", time.localtime())
+                        print(f"[{lock_acquired_time}] [设备锁] {test_case.test_id} 成功获取锁: {device_lock_name}")
+                        logger.debug(f"成功获取设备锁: {device_lock_name}")
+                    except TimeoutError as e:
+                        logger.error(f"获取设备级ADB锁超时 ({device_lock_name}): {e}")
+                        result_container["error"] = f"获取设备级ADB锁超时 ({device_lock_name}): {str(e)}"
+                        result_container["finished"] = True
+                        return
+
                 try:
                     logger.debug("Agent开始执行任务")
                     print(f"[DEBUG] Agent开始执行: {task_description[:50]}...")
 
-                    # 使用OutputCapture捕获Agent的输出
-                    capture = OutputCapture()
-                    capture.start()
+                    # 收集 AI 思考过程
+                    thinking_steps = []
 
-                    try:
-                        result = agent.run(task_description)
-                        result_container["result"] = result
-                        result_container["finished"] = True
+                    # 使用 step() 逐步执行以收集思考过程
+                    step_num = 0
+                    final_result = None
 
-                        # 获取捕获的输出
-                        captured_output = capture.stop()
-                        result_container["output"] = captured_output
+                    # 单步超时时间（从配置读取或使用默认值）
+                    step_timeout = getattr(self.config.agent, 'step_timeout', 60)  # 每步最多60秒
 
-                        logger.ai_interaction(f"AutoGLM响应: {result[:100] if result else 'None'}{'...' if result and len(result) > 100 else ''}")
-                        logger.debug(f"Agent执行完成, 步数: {agent.step_count}")
-                        print(f"[DEBUG] Agent执行完成，结果: {result[:50] if result else 'None'}...")
-                    except Exception as e:
-                        capture.stop()
-                        raise
+                    while True:
+                        # 为每个 step() 调用添加超时控制
+                        step_result = None
+                        step_timeout_occurred = False
+
+                        try:
+                            # 使用 ThreadPoolExecutor 为单个 step() 调用添加超时
+                            from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+                            with ThreadPoolExecutor(max_workers=1) as step_executor:
+                                step_future = step_executor.submit(
+                                    agent.step,
+                                    task_description if step_num == 0 else None
+                                )
+
+                                try:
+                                    step_result = step_future.result(timeout=step_timeout)
+                                except FutureTimeoutError:
+                                    step_timeout_occurred = True
+                                    logger.error(f"步骤 {step_num + 1} 超时（超过{step_timeout}秒）")
+                                    print(f"[ERROR] Agent 步骤 {step_num + 1} 超时（超过{step_timeout}秒），尝试恢复...")
+
+                                    # 尝试重置 Agent
+                                    try:
+                                        agent.reset()
+                                        logger.info("Agent 已重置")
+                                    except Exception as reset_error:
+                                        logger.error(f"重置 Agent 失败: {reset_error}")
+
+                                    # 标记为超时错误
+                                    final_result = f"步骤 {step_num + 1} 执行超时（超过{step_timeout}秒）"
+                                    break
+
+                        except Exception as step_error:
+                            # step() 调用本身抛出异常
+                            logger.error(f"步骤 {step_num + 1} 异常: {str(step_error)}")
+                            final_result = f"步骤 {step_num + 1} 异常: {str(step_error)}"
+                            break
+
+                        # 如果超时，已经在上面的 except 块中处理了
+                        if step_timeout_occurred:
+                            break
+
+                        if step_result is None:
+                            final_result = f"步骤 {step_num + 1} 返回空结果"
+                            break
+
+                        if not step_result.success:
+                            final_result = f"步骤执行失败: {step_result.message}"
+                            break
+
+                        # 记录思考过程
+                        if step_result.thinking:
+                            thinking_data = {
+                                "step": step_num + 1,
+                                "thinking": step_result.thinking,
+                                "action": step_result.action,
+                                "message": step_result.message
+                            }
+                            thinking_steps.append(thinking_data)
+
+                            # 打印思考过程到控制台
+                            print(f"\n{'='*60}")
+                            print(f"[AI 思考] 步骤 {step_num + 1}")
+                            print(f"{'='*60}")
+                            print(f"💭 {step_result.thinking}")
+                            if step_result.action:
+                                print(f"\n[动作] {step_result.action}")
+                            if step_result.message:
+                                print(f"\n[消息] {step_result.message}")
+                            print(f"{'='*60}\n")
+
+                            logger.ai_interaction(f"步骤 {step_num + 1} 思考: {step_result.thinking}")
+
+                        step_num += 1
+
+                        if step_result.finished:
+                            final_result = step_result.message or "任务完成"
+                            break
+
+                        if step_num >= self.config.agent.max_steps:
+                            final_result = f"达到最大步数 ({self.config.agent.max_steps})"
+                            break
+
+                    result_container["result"] = final_result
+                    result_container["finished"] = True
+                    result_container["thinking_steps"] = thinking_steps
+                    result_container["steps_taken"] = step_num
+
+                    logger.ai_interaction(f"AutoGLM响应: {final_result if final_result else 'None'}")
+                    logger.debug(f"Agent执行完成, 步数: {step_num}")
+                    print(f"[DEBUG] Agent执行完成，结果: {final_result[:50] if final_result else 'None'}...")
 
                 except Exception as e:
                     result_container["error"] = str(e)
@@ -364,6 +613,13 @@ class APIExecutor:
                     result_container["traceback"] = traceback.format_exc()
                     logger.error(f"Agent执行异常: {str(e)}")
                     print(f"[DEBUG] Agent执行异常: {str(e)}")
+
+                finally:
+                    # 释放设备级ADB锁
+                    if adb_lock is not None:
+                        lock_release_time = time.strftime("%H:%M:%S", time.localtime())
+                        print(f"[{lock_release_time}] [设备锁] {test_case.test_id} 释放锁: {device_lock_name}")
+                        adb_lock.release()
 
             # 使用线程实现超时控制
             thread = threading.Thread(target=run_agent)
@@ -404,7 +660,8 @@ class APIExecutor:
                     cleanup_success=cleanup_success,
                     cleanup_time=cleanup_time,
                     cleanup_warnings=cleanup_warnings,
-                    execution_log=logger.get_logs()
+                    execution_log=logger.get_logs(),
+                    thinking_process=result_container.get("thinking_steps", [])
                 )
 
             if result_container["error"]:
@@ -426,7 +683,8 @@ class APIExecutor:
                     cleanup_success=cleanup_success,
                     cleanup_time=cleanup_time,
                     cleanup_warnings=cleanup_warnings,
-                    execution_log=logger.get_logs()
+                    execution_log=logger.get_logs(),
+                    thinking_process=result_container.get("thinking_steps", [])
                 )
 
             # 成功执行
@@ -438,7 +696,9 @@ class APIExecutor:
 
             # 记录Agent输出
             if result_container.get("output"):
-                logger.debug(f"Agent输出: {result_container['output'][:200]}{'...' if len(result_container['output']) > 200 else ''}")
+                logger.debug(f"Agent输出: {result_container['output']}")
+
+            steps_taken = result_container.get("steps_taken", agent.step_count)
 
             return ExecutionResult(
                 test_id=test_case.test_id,
@@ -449,14 +709,15 @@ class APIExecutor:
                 end_time=time.strftime("%Y-%m-%d %H:%M:%S"),
                 device_id=test_case.device_id,
                 original_device_id=original_device_id,
-                output=result_container["result"] if result_container["result"] else f"执行成功，步数: {agent.step_count}",
-                output_preview=result_container["result"][:100] if result_container["result"] else f"执行成功，步数: {agent.step_count}",
-                steps_taken=agent.step_count,
+                output=result_container["result"] if result_container["result"] else f"执行成功，步数: {steps_taken}",
+                output_preview=result_container["result"][:100] if result_container["result"] else f"执行成功，步数: {steps_taken}",
+                steps_taken=steps_taken,
                 cleanup_executed=cleanup_executed,
                 cleanup_success=cleanup_success,
                 cleanup_time=cleanup_time,
                 cleanup_warnings=cleanup_warnings,
-                execution_log=logger.get_logs()
+                execution_log=logger.get_logs(),
+                thinking_process=result_container.get("thinking_steps", [])
             )
 
         except Exception as e:
@@ -477,7 +738,8 @@ class APIExecutor:
                 cleanup_success=cleanup_success,
                 cleanup_time=cleanup_time,
                 cleanup_warnings=cleanup_warnings,
-                execution_log=logger.get_logs()
+                execution_log=logger.get_logs(),
+                thinking_process=[]
             )
 
     def execute_batch(
@@ -510,9 +772,10 @@ class APIExecutor:
                     print(f"\n测试失败，停止执行")
                     break
         else:
-            # 【关键修改】不再按设备分组，直接提交所有用例到线程池
-            # 这样可以实现真正的跨设备并发执行
+            # 【方案二：设备级锁】不再按设备分组，直接提交所有用例到线程池
+            # 不同设备使用独立的锁，可以实现真正的跨设备并发执行
             print(f"\n[并发执行] 提交 {len(test_cases)} 个任务到线程池（max_workers={max_workers}）")
+            print(f"[并发模式] 设备级ADB锁已启用，不同设备可真正并发")
 
             # 统计每个设备的任务数
             device_task_count = {}
@@ -523,18 +786,22 @@ class APIExecutor:
             for device_id, count in device_task_count.items():
                 print(f"  - {device_id}: {count} 个任务")
 
+            import time
+            batch_start_time = time.time()
+
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {}
                 submitted_count = 0
 
                 # 直接提交所有用例到线程池
                 for tc in test_cases:
-                    print(f"[提交任务] {tc.test_id} -> 设备 {tc.device_id}")
+                    submit_time = time.strftime("%H:%M:%S", time.localtime())
+                    print(f"[{submit_time}] [提交任务] {tc.test_id} -> 设备 {tc.device_id}")
                     future = executor.submit(self.execute_test_case, tc, progress_callback)
                     futures[future] = tc
                     submitted_count += 1
 
-                print(f"[并发执行] 已提交 {submitted_count} 个任务")
+                print(f"[并发执行] 已提交 {submitted_count} 个任务，开始并发执行...\n")
 
                 # 收集结果
                 completed_count = 0
@@ -546,6 +813,12 @@ class APIExecutor:
                         result = future.result()
                         results.append(result)
                         completed_count += 1
+
+                        # 【并发验证】添加时间戳，观察不同设备的执行时间是否重叠
+                        complete_time = time.strftime("%H:%M:%S", time.localtime())
+                        elapsed_time = time.time() - batch_start_time
+                        print(f"[{complete_time}] [任务完成] {test_case.test_id} -> 设备 {test_case.device_id} | "
+                              f"状态: {result.status} | 耗时: {elapsed_time:.1f}s")
 
                         # 失败处理逻辑（支持多种策略）
                         if result.status in ["ERROR", "TIMEOUT"]:
@@ -610,8 +883,6 @@ class APIExecutor:
             截图文件路径
         """
         import os
-        import base64
-        from phone_agent.device_factory import get_device_factory
 
         try:
             # 创建截图目录
@@ -621,16 +892,25 @@ class APIExecutor:
             )
             os.makedirs(screenshot_dir, exist_ok=True)
 
-            # 获取截图
+            # 使用 DeviceService 保存截图
+            if self.device_service:
+                return self.device_service.save_screenshot(
+                    test_case.device_id,
+                    screenshot_dir,
+                    prefix=test_case.test_id
+                )
+
+            # Fallback 到旧方式
+            import base64
+            from phone_agent.device_factory import get_device_factory
+
             device_factory = get_device_factory()
             screenshot = device_factory.get_screenshot(test_case.device_id)
 
-            # 保存截图
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             filename = f"{test_case.test_id}_{timestamp}.png"
             screenshot_path = os.path.join(screenshot_dir, filename)
 
-            # 将base64转换为图片并保存
             image_data = base64.b64decode(screenshot.base64_data)
             with open(screenshot_path, 'wb') as f:
                 f.write(image_data)
@@ -649,11 +929,8 @@ class APIExecutor:
         Args:
             device_id: 设备ID
         """
-        with self._lock:
-            if device_id in self._agent_pool:
-                self._agent_pool[device_id].reset()
+        self.agent_pool_manager.reset_agent(device_id)
 
     def cleanup(self):
         """清理资源"""
-        with self._lock:
-            self._agent_pool.clear()
+        self.agent_pool_manager.cleanup_all()
