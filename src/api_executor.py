@@ -500,7 +500,7 @@ class APIExecutor:
         results = []
 
         # 如果只有一个worker或测试用例很少，使用串行执行
-        if max_workers <= 1 or len(test_cases) <= 1:
+        if max_workers is None or max_workers <= 1 or len(test_cases) <= 1:
             for test_case in test_cases:
                 result = self.execute_test_case(test_case, progress_callback)
                 results.append(result)

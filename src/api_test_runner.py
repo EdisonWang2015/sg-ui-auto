@@ -516,8 +516,8 @@ def main():
     parser.add_argument(
         "--on-failure",
         choices=["stop_all", "stop_device", "continue"],
-        default="stop_all",
-        help="失败处理策略（默认: stop_all）"
+        default=None,
+        help="失败处理策略（默认: 使用配置文件值）"
     )
 
     # 配置参数
@@ -527,8 +527,8 @@ def main():
     )
     parser.add_argument(
         "--output-dir",
-        default="test_reports",
-        help="报告输出目录（默认: test_reports）"
+        default=None,
+        help="报告输出目录（默认: 使用配置文件值）"
     )
 
     # 其他参数
@@ -544,15 +544,14 @@ def main():
     config = load_config(args.config)
 
     # 命令行参数覆盖配置（只有当用户明确指定时才覆盖）
-    if args.output_dir:
+    if args.output_dir is not None:
         config.reporting.output_dir = args.output_dir
     if args.continue_on_failure:
         config.execution.continue_on_failure = True
-    if args.max_workers is not None:  # 使用 is not None 而不是直接 if args.max_workers
+    if args.max_workers is not None:
         config.execution.max_workers = args.max_workers
-
-    # 失败策略
-    config.execution.failure_strategy = args.on_failure
+    if args.on_failure is not None:
+        config.execution.failure_strategy = args.on_failure
 
     # 创建设备分配器
     from device_allocator import DeviceAllocator, AllocationStrategy
@@ -573,7 +572,7 @@ def main():
     print(f"\n[设备分配器配置]")
     print(f"  分配策略: {args.allocation_strategy}")
     print(f"  强制分配: {'是' if args.force_allocate else '否（保留亲和性）'}")
-    print(f"  失败策略: {args.on_failure}")
+    print(f"  失败策略: {config.execution.failure_strategy}")
     available_devices = allocator.get_available_devices()
     print(f"  检测到设备: {len(available_devices)}个")
     for device_id in available_devices:
@@ -613,7 +612,7 @@ def main():
             test_type=args.filter_type,
             priority=args.filter_priority,
             device_id=args.device_id,
-            max_workers=args.max_workers,
+            max_workers=config.execution.max_workers,
             skip_device_check=args.skip_device_check,
             allocator=allocator
         )
